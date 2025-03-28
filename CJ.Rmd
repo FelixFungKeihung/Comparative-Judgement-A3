@@ -1,0 +1,307 @@
+---
+title: 'Comparative Judgement: a comparison of students and experts perceiving the
+  difficulty of mathematics questions'
+author: "Felix Feng, Eunice Lyu, Zhaocheng Fan, Ke Wan"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+This study is an extended work of of Akveld and Kinnear (2023) <https://github.com/georgekinnear/diagnostic-test-irt/>, which used item response theory (IRT) to evaluate and improve the design of a mathematics diagnostic test at the University of Edinburgh. While their analysis focused on item-level performance based on student responses, this study explores how the perceived difficulty of test items aligns with actual difficulty estimates from IRT.
+
+### Data
+Using a Comparative Judgement (CJ) approach, nine groups of judges — including undergraduate engineering mathematics students and mathematics lecturers or PhD students — compared pairs of 20 diagnostic test questions. Some groups viewed all questions, while others were shown only even- or odd-numbered subsets. In some conditions, judges were shown model solutions alongside the questions; others judged without them. Each participant made either 20 or 40 pairwise comparisons, depending on group. In terms of comparison to actual difficulty level, we used dataset `expected_scores` from the original study. It is a tidy-format dataframe that shows how each diagnostic test item performs across a range of student ability levels, based on the fitted IRT model. 
+
+
+## Analysis
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(ez)
+library(data.table)
+library(effectsize)
+library(effsize)
+library(gridExtra)
+library(pwr)
+library(purrr)
+library(furrr)
+library(plotly)
+library(stringr)
+library(sirt)
+library(ggpubr)
+library(correlation)
+library(patchwork)
+library(tinytex)
+```
+```{r, echo=FALSE}
+experts_even = read.csv("experts-even.csv")
+experts_odd = read.csv("experts-odd.csv")
+experts_withsolutions = read.csv("experts-withsolutions.csv")
+students_even = read.csv("students-even.csv")
+students_odd = read.csv("students-odd.csv")
+students_withoutsolutions = read.csv("students-withoutsolutions.csv")
+students_withsolutions_1 = read.csv("students-withsolutions1.csv")
+students_withsolutions_2 = read.csv("students-withsolutions2.csv")
+students_withsolutions = read.csv("students-withsolutions.csv")
+expected_scores = read.csv("expected_scores.csv")
+```
+
+### Preparation 
+
+```{r, results='hide'}
+df = bind_rows(experts_even, experts_odd,experts_withsolutions, students_even, students_odd, students_withoutsolutions, students_withsolutions, students_withsolutions_1, students_withsolutions_2)
+
+df_clean <- df %>%
+  rename(winner = candidate_chosen,
+         loser = candidate_not_chosen) %>%
+  mutate(
+    judge_group = if_else(str_detect(study, "experts"), "expert", "student"),
+    question_subset = case_when(
+      str_detect(study, "even") ~ "even",
+      str_detect(study, "odd") ~ "odd",
+      TRUE ~ "all"
+    ),
+    solutions_shown = !str_detect(study, "withoutsolutions"),
+    num_comparisons_expected = case_when(
+      str_detect(study, "withsolutions2") ~ 40,
+      TRUE ~ 20
+    )
+  )
+
+```
+
+We first prepared data for further analysis. All nine judge groups(students and experts) were combined into one dataset, with a cleaning process to rename(winner or loser, in the line with Bradley–Terry later) and to add metadata columns(judge_group, question_subset, solutions_shown, num_comparisons_expected) for clarity.
+
+
+### Bradley–Terry Model
+
+To estimate perceived difficulty, we fitted separate Bradley–Terry (BT) models for student and expert judgements. In each case, the model was applied to pairwise comparison data, where judges indicated which of two questions appeared more difficult. The models account for judge-specific effects and were fitted using the btm() function, with the judge identities included as random effects. This yielded a set of difficulty scores (theta values) for each question, scaled such that higher values indicate greater perceived difficulty. These estimates allow for direct comparison between student and expert perceptions, as well as with actual difficulty derived from IRT analysis. Please see code below for BT model process.
+
+```{r, echo=TRUE, message=FALSE, results='hide'}
+btm_students <- btm(
+  data = df_clean %>%
+    filter(judge_group == "student") %>%
+    transmute(winner, loser, result = 1) %>%
+    data.frame(),
+  judge = df_clean %>% filter(judge_group == "student") %>% pull(judge),
+  fix.eta = 0,
+  maxiter = 400
+)
+
+# Fit BT model for experts
+btm_experts <- btm(
+  data = df_clean %>%
+    filter(judge_group == "expert") %>%
+    transmute(winner, loser, result = 1) %>%
+    data.frame(),
+  judge = df_clean %>% filter(judge_group == "expert") %>% pull(judge),
+  fix.eta = 0,
+  maxiter = 400
+)
+
+```
+### Reliability Check: Standardized Separation Ratio
+
+To assess the reliability of the Bradley–Terry model estimates, we computed the Standardized Separation Ratio (SSR) for both student and expert judgements. Please see code below. The SSR quantifies how well the model distinguishes between items based on perceived difficulty, with values closer to 1 indicating stronger separation and more reliable estimates. 
+
+```{r}
+ssr_student <- btm_students$sepG^2 / (1 + btm_students$sepG^2)
+ssr_expert  <- btm_experts$sepG^2 / (1 + btm_experts$sepG^2)
+
+tibble(
+  group = c("Students", "Experts"),
+  SSR = c(ssr_student, ssr_expert)
+)
+
+```
+The results imply high reliability in both groups, with an SSR of $0.935$ for students and $0.912$ for experts. This suggests that both students and experts made consistent judgements, allowing the model to confidently differentiate between the difficulty levels of the test items. After the reliability checks, we extracted the estimated difficulty scores (θ) for each question from both the student and expert Bradley–Terry models, then binded them into a single dataset for comparison.
+
+```{r, warning=FALSE}
+student_scores <- btm_students$effects %>%
+  select(question = individual, student_theta = theta, student_se = se.theta)
+
+expert_scores <- btm_experts$effects %>%
+  select(question = individual, expert_theta = theta, expert_se = se.theta)
+
+cj_scores <- left_join(student_scores, expert_scores, by = "question")
+
+```
+
+### Comparison between Students and Experts 
+
+To examine the agreement between students and experts in their perceptions of question difficulty, we compared the Bradley–Terry theta estimates from each group. A scatterplot with a fitted linear trend suggested a strong positive relationship, which was confirmed by a Spearman's rank correlation of ρ = 0.80 (p < 0.001). This indicates a strong correlation between students and experts judgement in how they rank the relative difficulty of the questions, despite potential differences in mathematical experience or problem-solving approach.
+
+```{r}
+cor.test(cj_scores$expert_theta, cj_scores$student_theta, method = "spearman")
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+cj_scores %>%
+  ggplot(aes(x = expert_theta, y = student_theta)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "gray") +
+  geom_text(aes(label = question), vjust = 1.2, size = 3) +
+  ggpubr::stat_cor(method = "spearman") +
+  labs(
+    x = "Perceived Difficulty (Experts)",
+    y = "Perceived Difficulty (Students)",
+    title = "Do Students and Experts Agree on Question Difficulty?"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r, echo = FALSE, warning=FALSE, results='hide'}
+cj_scores <- cj_scores %>%
+  mutate(perception_gap = student_theta - expert_theta) %>%
+  arrange(desc(abs(perception_gap)))
+
+cj_scores %>%
+  mutate(across(contains("theta"), round, 3)) %>%
+  arrange(desc(student_theta)) %>%
+  knitr::kable(caption = "CJ Scores: Perceived Difficulty by Students and Experts")
+
+
+```
+
+### Actual Difficulty Generation
+
+To estimate the actual difficulty of each question, we used the expected_scores dataset, as mentioned in Data section,derived from the fitted Generalized Partial Credit Model (GPCM) in the IRT framework(please see original study by Akveld and Kinnear). This dataset records the expected score for each item across a range of ability levels (θ), based on the fitted Generalized Partial Credit Model. For each item, we identified the ability level at which the expected score was closest to 2.5 (half marks), treating this θ value as the item’s empirical difficulty. Since our analysis focuses on the revised version of the diagnostic test used in the Comparative Judgement task, we selected only items that appeared in the post-test version. These were matched to the corresponding CJ question numbers to enable direct comparison between perceived and actual difficulty.
+
+```{r}
+irt_difficulty_est <- expected_scores %>%
+  mutate(diff_to_half = abs(expected_score - 2.5)) %>%
+  group_by(item) %>%
+  slice_min(order_by = diff_to_half, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(item, irt_difficulty = theta)%>%
+  mutate(question = case_when(item == "e0_E10" ~ 10,
+                              item == "e0_E11" ~ 11,
+                              item == "e0_E7" ~ 7,
+                              item == "e1_E1" ~ 1,
+                              item == "e3_E2" ~ 2,
+                              item == "e4_E3" ~ 3,
+                              item == "e5_E4" ~ 4,
+                              item == "e6_E5" ~ 5,
+                              item == "e7_E6" ~ 6,
+                              item == "e9_E8" ~ 8,
+                              item == "e10_E9" ~ 9,
+                              item == "e12_E12" ~ 12,
+                              item == "e13_E13" ~ 13,
+                              item == "e14_E14" ~ 14,
+                              item == "e15_E15" ~ 15,
+                              item == "e16_E16" ~ 16,
+                              item == "e17_E17" ~ 17,
+                              item == "e18_E18" ~ 18,
+                              item == "e19_E19" ~ 19,
+                              item == "e20_E20" ~ 20))%>%
+  filter(!is.na(question))
+
+cj_scores <- cj_scores %>%
+  left_join(irt_difficulty_est, by = "question")
+
+```
+
+### Actual Difficulty Comparison
+
+To assess how well perceived difficulty aligns with actual difficulty, we computed Spearman rank correlations between the IRT-based difficulty estimates and the Bradley–Terry scores from both students and experts. 
+
+```{r}
+correlation(
+  data = cj_scores,
+  select = "irt_difficulty",
+  select2 = c("student_theta", "expert_theta"),
+  method = "spearman"
+)
+```
+
+The results show strong, statistically significant positive correlations in both cases: ρ = 0.72 (p < .001) for students and ρ = 0.72 (p < .001) for experts. This indicates that both groups' perceptions are closely aligned with actual item difficulty as estimated by the IRT model. The confidence intervals ([0.40, 0.89]) suggest that this relationship is robust, supporting the validity of the comparative judgement approach in capturing meaningful difficulty information. To further confirm that, we visualized the perceived and actual difficulty. 
+
+```{r, echo=FALSE, warning=FALSE, message =FALSE}
+library(tidyr)
+
+cj_long <- cj_scores %>%
+  select(question, student_theta, expert_theta, irt_difficulty) %>%
+  pivot_longer(
+    cols = c(student_theta, expert_theta, irt_difficulty),
+    names_to = "group",
+    values_to = "theta"
+  )
+figure_1<-ggplot(cj_long, aes(x = question, y = theta, color = group)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 1) +
+  scale_color_manual(
+    values = c(
+      student_theta = "blue",
+      expert_theta = "green",
+      irt_difficulty = "red"
+    ),
+    labels = c(
+      student_theta = "Students",
+      expert_theta = "Experts",
+      irt_difficulty = "IRT"
+    ),
+    name = "Source"
+  ) +
+  labs(
+    x = "Question",
+    y = expression(Difficulty~(theta)),
+    title = "Comparison of Perceived and Actual Difficulty"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+
+figure_2<-ggplot(cj_scores, aes(x = irt_difficulty, y = student_theta)) +
+  geom_point(color = "grey", size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  geom_text(aes(label = question), vjust = 1.2, size = 3)+
+  ggpubr::stat_cor(method = "spearman") +
+  labs(
+    x = "IRT Difficulty",
+    y = "Perceived Difficulty (Students)",
+    title = "Students' Perception vs Actual"
+  ) +
+  theme_minimal()
+
+
+figure_3<-ggplot(cj_scores, aes(x = irt_difficulty, y = expert_theta)) +
+  geom_point(colour = "grey", size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  geom_text(aes(label = question), vjust = 1.2, size = 3)+
+  ggpubr::stat_cor(method = "spearman") +
+  labs(
+    x = "IRT Difficulty",
+    y = "Perceived Difficulty (Experts)",
+    title = "Experts' Perception vs Actual"
+  ) +
+  theme_minimal()
+
+figure_1 
+figure_2 + figure_3
+
+
+```
+
+Figure 1 visualizes the perceived and actual difficulty levels across all 20 questions, showing close alignment between students, experts, and IRT-based estimates. Figures 2 and 3 further illustrate this relationship by plotting perceived difficulty against actual IRT difficulty for students and experts, respectively. In both cases, the positive linear trends and high Spearman correlation values (ρ = 0.72) confirm a strong agreement between perceived and actual difficulty. These visualizations confirm the earlier statistical findings, emphasizing the consistency between expert and student judgement and the IRT model. 
+
+## Conclusion
+
+This study set out to examine how well students and experts perceive the difficulty of mathematics diagnostic test questions, and how these perceptions align with actual item difficulty as estimated through item response theory. The results show strong agreement between students and experts in their perceived difficulty rankings, and both groups’ perceptions were closely aligned with actual difficulty . These findings suggest that comparative judgement is a valid method for capturing perceived difficulty, and that both students and experts can reliably identify which questions are more challenging. The close alignment with IRT difficulty also reinforces the quality of the revised diagnostic test. Overall, this work highlights the value of combining psychometric modelling with perception-based approaches to better understand and evaluate mathematical assessment items.
+
+
+## References
+Akveld, M., & Kinnear, G. (2023). Improving mathematics diagnostic tests using item analysis. International Journal of Mathematical Education in Science and Technology, 55(10), 2478–2505. https://doi.org/10.1080/0020739X.2023.2167132
+
+## Appendix
+Please find dataset and R markdown file for this study on github repo <https://github.com/FelixFungKeihung/Comparative-Judgement-A3/>.
+
+
